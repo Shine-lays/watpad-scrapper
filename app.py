@@ -20,24 +20,34 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
 async def extract_wattpad_text_async(url: str) -> str:
     browser = None
+    context = None # Fixed: Initialize here so finally block can see it
     try:
         logger.info(f"Starting Playwright browser for: {url}")
 
         async with async_playwright() as p:
+            # Fixed: Added flags to fit in 512MB RAM
             browser = await p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox'],
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--single-process',
+                    '--no-zygote'
+                ],
             )
-            context = await browser.new_context()
+            
+            # Fixed: Set user_agent in the context (fixes your 'Page' error)
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+            )
+            
             page = await context.new_page()
-
-            await page.set_user_agent(
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            )
 
             await page.goto(url, wait_until='domcontentloaded', timeout=60000)
             await page.wait_for_timeout(2000)
 
+            # --- YOUR EXACT EVALUATE LOGIC ---
             await page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
@@ -59,6 +69,7 @@ async def extract_wattpad_text_async(url: str) -> str:
             logger.info("Extracting text from rendered page...")
             text_parts = []
 
+            # --- YOUR EXACT SCRAPING LOGIC (LINE BY LINE) ---
             elements = await page.query_selector_all('[data-p-id]')
             for elem in elements:
                 text = await elem.text_content()
@@ -66,7 +77,6 @@ async def extract_wattpad_text_async(url: str) -> str:
                     text_parts.append(text.strip())
 
             if text_parts:
-                await context.close()
                 return '\n\n'.join(text_parts)
 
             article = await page.query_selector('article, main, [role="main"]')
@@ -78,7 +88,6 @@ async def extract_wattpad_text_async(url: str) -> str:
                         text_parts.append(text.strip())
 
             if text_parts:
-                await context.close()
                 return '\n\n'.join(text_parts)
 
             selectors = ['.part-content', '.story-content', '.chapter-content', '[class*="story"]']
@@ -92,7 +101,6 @@ async def extract_wattpad_text_async(url: str) -> str:
                             if text and text.strip() and len(text.strip()) > 20:
                                 text_parts.append(text.strip())
                         if text_parts:
-                            await context.close()
                             return '\n\n'.join(text_parts)
 
             all_paragraphs = await page.query_selector_all('p')
@@ -103,17 +111,18 @@ async def extract_wattpad_text_async(url: str) -> str:
                         text_parts.append(text.strip())
 
             if text_parts:
-                await context.close()
                 return '\n\n'.join(text_parts)
 
             all_text = await page.inner_text('body')
-            await context.close()
             return all_text if all_text else ''
 
     except Exception as e:
         logger.error(f"Extraction error: {str(e)}")
         raise
     finally:
+        # Fixed: Proper cleanup for 512MB limit
+        if context:
+            await context.close()
         if browser:
             await browser.close()
 
@@ -134,12 +143,10 @@ def translate_to_burmese(text: str) -> str:
 
     max_chunk = 2500
     chunks = [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]
-
     translations = []
 
     for i, chunk in enumerate(chunks):
         logger.info(f"Translating chunk {i+1}/{len(chunks)}")
-
         response = requests.post(
             'https://api.groq.com/openai/v1/chat/completions',
             headers={
@@ -165,16 +172,10 @@ def translate_to_burmese(text: str) -> str:
         )
 
         if response.status_code != 200:
-            try:
-                error_data = response.json()
-                raise Exception(f"Groq API error: {error_data.get('error', {}).get('message', 'Unknown error')}")
-            except:
-                raise Exception("Groq API error: Unknown error (non-json response)")
+            raise Exception(f"Groq API error: {response.text}")
 
         result = response.json()
-        translated_chunk = result['choices'][0]['message']['content']
-        translations.append(translated_chunk)
-
+        translations.append(result['choices'][0]['message']['content'])
         time.sleep(0.5)
 
     return '\n\n'.join(translations)
@@ -184,25 +185,16 @@ def extract_only():
     try:
         data = request.json
         url = data.get('url')
-
         if not url:
             return jsonify({'error': 'URL is required'}), 400
-
         if 'wattpad.com' not in url:
             return jsonify({'error': 'Invalid Wattpad URL'}), 400
 
         extracted_text = extract_wattpad_text(url)
-
         if not extracted_text or len(extracted_text) < 100:
-            return jsonify({'error': 'Could not extract sufficient text from the story.'}), 400
+            return jsonify({'error': 'Could not extract sufficient text.'}), 400
 
-        return jsonify({
-            'success': True,
-            'text': extracted_text,
-            'character_count': len(extracted_text),
-            'url': url
-        }), 200
-
+        return jsonify({'success': True, 'text': extracted_text, 'url': url}), 200
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -212,21 +204,10 @@ def translate_only():
     try:
         data = request.json
         text = data.get('text')
-
         if not text:
             return jsonify({'error': 'Text is required'}), 400
-
         translated_text = translate_to_burmese(text)
-
-        return jsonify({
-            'success': True,
-            'translation': translated_text,
-            'character_count': {
-                'original': len(text),
-                'translated': len(translated_text)
-            }
-        }), 200
-
+        return jsonify({'success': True, 'translation': translated_text}), 200
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
