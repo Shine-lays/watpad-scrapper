@@ -1,19 +1,16 @@
-# Use the official Playwright image (this includes the OS libraries you were missing)
-FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy and install requirements
+# Install system dependencies for curl_cffi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the browser binaries
-RUN playwright install chromium
-
 COPY . .
 
-# Match your Flask port
-EXPOSE 5000
-
-# Run with Gunicorn
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "app:app"]
+# Use 1 worker to ensure we stay under 512MB RAM
+CMD ["gunicorn", "--worker-class", "sync", "-w", "1", "-b", "0.0.0.0:5000", "--timeout", "120", "app:app"]
