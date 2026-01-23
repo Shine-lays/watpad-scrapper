@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+# IMPORTANT: Allow your Vercel frontend to talk to this backend
+CORS(app, resources={r"/*": {"origins": "*"}}) 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,61 +21,43 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
 def extract_wattpad_text(url: str) -> str:
     try:
-        logger.info(f"Stealth-fetching URL: {url}")
+        logger.info(f"Fetching story from: {url}")
         
-        # This impersonates a real Chrome browser at the network level
-        # Uses very little RAM compared to Playwright
+        # Impersonate Chrome to bypass Cloudflare on 512MB RAM
         r = cureq.get(url, impersonate="chrome", timeout=30)
         
         if r.status_code != 200:
-            raise Exception(f"Wattpad returned status {r.status_code}")
+            raise Exception(f"Wattpad blocked the request (Status {r.status_code})")
 
         soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # FIX: Instead of looking for a container, we grab ALL paragraphs 
+        # that have the Wattpad 'data-p-id' attribute. This "jumps over" audio players.
+        all_paragraphs = soup.find_all('p', attrs={'data-p-id': True})
+        
         text_parts = []
+        for p in all_paragraphs:
+            text = p.get_text().strip()
+            # Ignore very short snippets or ads
+            if len(text) > 5:
+                text_parts.append(text)
 
-        # --- YOUR EXACT SCRAPING LOGIC REBUILT FOR BEAUTIFULSOUP ---
-        
-        # 1. data-p-id (The standard Wattpad story format)
-        elements = soup.find_all(attrs={"data-p-id": True})
-        for elem in elements:
-            t = elem.get_text().strip()
-            if t:
-                text_parts.append(t)
-
-        # 2. Fallback: article/main
+        # Fallback if data-p-id fails (sometimes happens on mobile versions)
         if not text_parts:
-            container = soup.find(['article', 'main']) or soup.find(attrs={"role": "main"})
-            if container:
-                for p in container.find_all('p'):
-                    t = p.get_text().strip()
-                    if len(t) > 20:
-                        text_parts.append(t)
+            logger.info("data-p-id not found, trying fallback story selectors...")
+            story_body = soup.find('article') or soup.find('main')
+            if story_body:
+                for p in story_body.find_all('p'):
+                    text = p.get_text().strip()
+                    if len(text) > 20:
+                        text_parts.append(text)
 
-        # 3. Fallback: Content Selectors
         if not text_parts:
-            selectors = ['.part-content', '.story-content', '.chapter-content']
-            for selector in selectors:
-                container = soup.select_one(selector)
-                if container:
-                    for p in container.find_all('p'):
-                        t = p.get_text().strip()
-                        if len(t) > 20:
-                            text_parts.append(t)
-                    if text_parts: break
+            raise Exception("Could not find any story text on this page.")
 
-        # 4. Last Resort: All long paragraphs
-        if not text_parts:
-            for p in soup.find_all('p'):
-                t = p.get_text().strip()
-                if len(t) > 30:
-                    if not any(x in t.lower() for x in ['advertisement', 'sponsored', 'follow', 'share', 'vote', 'comment']):
-                        text_parts.append(t)
-
-        if text_parts:
-            return '\n\n'.join(text_parts)
-        
-        # If all fails, just grab the body text
-        return soup.get_text(separator='\n\n', strip=True)
+        full_text = '\n\n'.join(text_parts)
+        logger.info(f"Successfully extracted {len(full_text)} characters.")
+        return full_text
 
     except Exception as e:
         logger.error(f"Scraper error: {str(e)}")
@@ -82,51 +65,87 @@ def extract_wattpad_text(url: str) -> str:
 
 def translate_to_burmese(text: str) -> str:
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY missing")
+        raise ValueError("GROQ_API_KEY is not set in environment variables.")
 
-    chunks = [text[i:i+2500] for i in range(0, len(text), 2500)]
+    # Break text into chunks to avoid Groq's output limit
+    max_chunk = 2000
+    chunks = [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]
     translations = []
 
-    for chunk in chunks:
-        response = requests.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            headers={'Authorization': f'Bearer {GROQ_API_KEY}'},
-            json={
-                'model': 'mixtral-8x7b-32768',
-                'messages': [
-                    {'role': 'system', 'content': 'Translate to Burmese. Provide only translation.'},
-                    {'role': 'user', 'content': chunk}
-                ],
-                'temperature': 0.3
-            },
-            timeout=60
-        )
-        if response.status_code == 200:
-            translations.append(response.json()['choices'][0]['message']['content'])
-        time.sleep(0.5)
+    for i, chunk in enumerate(chunks):
+        logger.info(f"Translating chunk {i+1}/{len(chunks)}...")
+        try:
+            response = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {GROQ_API_KEY}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'mixtral-8x7b-32768',
+                    'messages': [
+                        {'role': 'system', 'content': 'You are a professional translator. Translate the text to Burmese (Myanmar). Maintain the story tone. Output ONLY the translated text.'},
+                        {'role': 'user', 'content': f"Translate this:\n\n{chunk}"}
+                    ],
+                    'temperature': 0.3,
+                },
+                timeout=90 # High timeout for slow translations
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                translations.append(result['choices'][0]['message']['content'])
+            else:
+                logger.error(f"Groq API error: {response.text}")
+                translations.append(f"[Translation Error for this chunk: {response.status_code}]")
+            
+            time.sleep(0.5) # Prevent rate limiting
+        except Exception as e:
+            logger.error(f"Chunk translation failed: {str(e)}")
+            translations.append(f"[Chunk Error: {str(e)}]")
 
     return '\n\n'.join(translations)
 
 @app.route('/extract', methods=['POST'])
-def extract_only():
+def extract_route():
     try:
-        url = request.json.get('url')
-        if not url or 'wattpad.com' not in url:
-            return jsonify({'error': 'Invalid URL'}), 400
+        data = request.get_json()
+        url = data.get('url')
+        if not url:
+            return jsonify({'error': 'URL is required'}), 400
         
         text = extract_wattpad_text(url)
-        return jsonify({'success': True, 'text': text, 'url': url})
+        return jsonify({
+            'success': True,
+            'text': text,
+            'character_count': len(text)
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/translate', methods=['POST'])
-def translate_only():
+def translate_route():
     try:
-        text = request.json.get('text')
-        if not text: return jsonify({'error': 'No text'}), 400
-        return jsonify({'success': True, 'translation': translate_to_burmese(text)})
+        data = request.get_json()
+        text = data.get('text')
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
+        
+        burmese_text = translate_to_burmese(text)
+        
+        # We must return exactly what the frontend code expects
+        return jsonify({
+            'success': True,
+            'translation': burmese_text,
+            'character_count': {
+                'original': len(text),
+                'translated': len(burmese_text)
+            }
+        })
     except Exception as e:
+        logger.error(f"Translation Route Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
