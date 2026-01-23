@@ -131,23 +131,19 @@ def extract_route():
 def translate_route():
     try:
         data = request.get_json()
-        text = data.get('text')
-        if not text:
-            return jsonify({'error': 'No text provided'}), 400
+        text = data.get('text', '')
         
-        burmese_text = translate_to_burmese(text)
+        translated_text = translate_to_burmese(text)
         
-        # We must return exactly what the frontend code expects
         return jsonify({
             'success': True,
-            'translation': burmese_text,
+            'translation': translated_text,
             'character_count': {
                 'original': len(text),
-                'translated': len(burmese_text)
+                'translated': len(translated_text)
             }
         })
     except Exception as e:
-        logger.error(f"Translation Route Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
