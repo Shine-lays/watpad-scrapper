@@ -107,33 +107,40 @@ def translate_chunk_with_retry(chunk: str, retries=3):
         try:
             response = requests.post(
                 'https://api.groq.com/openai/v1/chat/completions',
-                headers={'Authorization': f'Bearer {current_key}', 'Content-Type': 'application/json'},
+                headers={
+                    'Authorization': f'Bearer {current_key}',
+                    'Content-Type': 'application/json'
+                },
                 json={
-                    'model': 'llama-3.3-70b-versatile',
+                    'model': 'openai/gpt-oss-120b',
                     'messages': [
                         {'role': 'system', 'content': BURMESE_SYSTEM_PROMPT},
-                        {'role': 'user', 'content': f"Translate this story segment:\n\n{chunk}"}
+                        {'role': 'user', 'content': f"{chunk}"}
                     ],
-                    'temperature': 0.4,
+                    'temperature': 0.2,
                 },
                 timeout=90
             )
 
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
-            
-            # If rate limited (429) or service overloaded, rotate key and retry
-            if response.status_code in [429, 503, 400]:
+
+            # Retry only on congestion / rate limit
+            if response.status_code in [429, 503]:
                 rotate_key()
                 time.sleep(1)
                 continue
-            
+
+            # 400 or others = real error (context, payload, etc.)
             logger.error(f"Groq API Error {response.status_code}: {response.text}")
+            break
+
         except Exception as e:
             logger.error(f"Network error with key {current_key_index}: {str(e)}")
             rotate_key()
-            
+
     return "[Translation failed for this section]"
+
 
 def translate_to_burmese(text: str) -> str:
     # 1500 characters per chunk keeps us safe from most Rate Limits
