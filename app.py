@@ -4,9 +4,9 @@ import requests
 import logging
 import os
 import time
-import asyncio
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+from curl_cffi import requests as cureq
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
@@ -18,164 +18,91 @@ logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
-async def extract_wattpad_text_async(url: str) -> str:
-    browser = None
-    context = None # Fixed: Initialize here so finally block can see it
-    try:
-        logger.info(f"Starting Playwright browser for: {url}")
-
-        async with async_playwright() as p:
-            # Fixed: Added flags to fit in 512MB RAM
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--single-process',
-                    '--no-zygote'
-                ],
-            )
-            
-            # Fixed: Set user_agent in the context (fixes your 'Page' error)
-            context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-            )
-            
-            page = await context.new_page()
-
-            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
-            await page.wait_for_timeout(2000)
-
-            # --- YOUR EXACT EVALUATE LOGIC ---
-            await page.evaluate("""
-                async () => {
-                    await new Promise((resolve) => {
-                        let totalHeight = 0;
-                        const distance = 100;
-                        const timer = setInterval(() => {
-                            window.scrollBy(0, distance);
-                            totalHeight += distance;
-                            if (totalHeight >= document.body.scrollHeight) {
-                                clearInterval(timer);
-                                window.scrollTo(0, 0);
-                                resolve();
-                            }
-                        }, 150);
-                    });
-                }
-            """)
-
-            logger.info("Extracting text from rendered page...")
-            text_parts = []
-
-            # --- YOUR EXACT SCRAPING LOGIC (LINE BY LINE) ---
-            elements = await page.query_selector_all('[data-p-id]')
-            for elem in elements:
-                text = await elem.text_content()
-                if text and text.strip():
-                    text_parts.append(text.strip())
-
-            if text_parts:
-                return '\n\n'.join(text_parts)
-
-            article = await page.query_selector('article, main, [role="main"]')
-            if article:
-                paragraphs = await article.query_selector_all('p')
-                for p in paragraphs:
-                    text = await p.text_content()
-                    if text and text.strip() and len(text.strip()) > 20:
-                        text_parts.append(text.strip())
-
-            if text_parts:
-                return '\n\n'.join(text_parts)
-
-            selectors = ['.part-content', '.story-content', '.chapter-content', '[class*="story"]']
-            for selector in selectors:
-                container = await page.query_selector(selector)
-                if container:
-                    paragraphs = await container.query_selector_all('p')
-                    if paragraphs:
-                        for p in paragraphs:
-                            text = await p.text_content()
-                            if text and text.strip() and len(text.strip()) > 20:
-                                text_parts.append(text.strip())
-                        if text_parts:
-                            return '\n\n'.join(text_parts)
-
-            all_paragraphs = await page.query_selector_all('p')
-            for p in all_paragraphs:
-                text = await p.text_content()
-                if text and len(text.strip()) > 30:
-                    if not any(x in text.lower() for x in ['advertisement', 'sponsored', 'follow', 'share', 'vote', 'comment', 'terms', 'privacy']):
-                        text_parts.append(text.strip())
-
-            if text_parts:
-                return '\n\n'.join(text_parts)
-
-            all_text = await page.inner_text('body')
-            return all_text if all_text else ''
-
-    except Exception as e:
-        logger.error(f"Extraction error: {str(e)}")
-        raise
-    finally:
-        # Fixed: Proper cleanup for 512MB limit
-        if context:
-            await context.close()
-        if browser:
-            await browser.close()
-
 def extract_wattpad_text(url: str) -> str:
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(extract_wattpad_text_async(url))
-        loop.close()
-        return result
+        logger.info(f"Stealth-fetching URL: {url}")
+        
+        # This impersonates a real Chrome browser at the network level
+        # Uses very little RAM compared to Playwright
+        r = cureq.get(url, impersonate="chrome", timeout=30)
+        
+        if r.status_code != 200:
+            raise Exception(f"Wattpad returned status {r.status_code}")
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+        text_parts = []
+
+        # --- YOUR EXACT SCRAPING LOGIC REBUILT FOR BEAUTIFULSOUP ---
+        
+        # 1. data-p-id (The standard Wattpad story format)
+        elements = soup.find_all(attrs={"data-p-id": True})
+        for elem in elements:
+            t = elem.get_text().strip()
+            if t:
+                text_parts.append(t)
+
+        # 2. Fallback: article/main
+        if not text_parts:
+            container = soup.find(['article', 'main']) or soup.find(attrs={"role": "main"})
+            if container:
+                for p in container.find_all('p'):
+                    t = p.get_text().strip()
+                    if len(t) > 20:
+                        text_parts.append(t)
+
+        # 3. Fallback: Content Selectors
+        if not text_parts:
+            selectors = ['.part-content', '.story-content', '.chapter-content']
+            for selector in selectors:
+                container = soup.select_one(selector)
+                if container:
+                    for p in container.find_all('p'):
+                        t = p.get_text().strip()
+                        if len(t) > 20:
+                            text_parts.append(t)
+                    if text_parts: break
+
+        # 4. Last Resort: All long paragraphs
+        if not text_parts:
+            for p in soup.find_all('p'):
+                t = p.get_text().strip()
+                if len(t) > 30:
+                    if not any(x in t.lower() for x in ['advertisement', 'sponsored', 'follow', 'share', 'vote', 'comment']):
+                        text_parts.append(t)
+
+        if text_parts:
+            return '\n\n'.join(text_parts)
+        
+        # If all fails, just grab the body text
+        return soup.get_text(separator='\n\n', strip=True)
+
     except Exception as e:
-        logger.error(f"Sync wrapper error: {str(e)}")
+        logger.error(f"Scraper error: {str(e)}")
         raise
 
 def translate_to_burmese(text: str) -> str:
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY not configured")
+        raise ValueError("GROQ_API_KEY missing")
 
-    max_chunk = 2500
-    chunks = [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]
+    chunks = [text[i:i+2500] for i in range(0, len(text), 2500)]
     translations = []
 
-    for i, chunk in enumerate(chunks):
-        logger.info(f"Translating chunk {i+1}/{len(chunks)}")
+    for chunk in chunks:
         response = requests.post(
             'https://api.groq.com/openai/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {GROQ_API_KEY}',
-                'Content-Type': 'application/json',
-            },
+            headers={'Authorization': f'Bearer {GROQ_API_KEY}'},
             json={
                 'model': 'mixtral-8x7b-32768',
                 'messages': [
-                    {
-                        'role': 'system',
-                        'content': 'You are a professional translator. Translate the given text to Burmese (Myanmar language). Maintain formatting and preserve line breaks. Only provide the translation without explanations.'
-                    },
-                    {
-                        'role': 'user',
-                        'content': f'Translate this to Burmese:\n\n{chunk}'
-                    }
+                    {'role': 'system', 'content': 'Translate to Burmese. Provide only translation.'},
+                    {'role': 'user', 'content': chunk}
                 ],
-                'temperature': 0.3,
-                'max_tokens': 2048,
+                'temperature': 0.3
             },
             timeout=60
         )
-
-        if response.status_code != 200:
-            raise Exception(f"Groq API error: {response.text}")
-
-        result = response.json()
-        translations.append(result['choices'][0]['message']['content'])
+        if response.status_code == 200:
+            translations.append(response.json()['choices'][0]['message']['content'])
         time.sleep(0.5)
 
     return '\n\n'.join(translations)
@@ -183,35 +110,23 @@ def translate_to_burmese(text: str) -> str:
 @app.route('/extract', methods=['POST'])
 def extract_only():
     try:
-        data = request.json
-        url = data.get('url')
-        if not url:
-            return jsonify({'error': 'URL is required'}), 400
-        if 'wattpad.com' not in url:
-            return jsonify({'error': 'Invalid Wattpad URL'}), 400
-
-        extracted_text = extract_wattpad_text(url)
-        if not extracted_text or len(extracted_text) < 100:
-            return jsonify({'error': 'Could not extract sufficient text.'}), 400
-
-        return jsonify({'success': True, 'text': extracted_text, 'url': url}), 200
+        url = request.json.get('url')
+        if not url or 'wattpad.com' not in url:
+            return jsonify({'error': 'Invalid URL'}), 400
+        
+        text = extract_wattpad_text(url)
+        return jsonify({'success': True, 'text': text, 'url': url})
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/translate', methods=['POST'])
 def translate_only():
     try:
-        data = request.json
-        text = data.get('text')
-        if not text:
-            return jsonify({'error': 'Text is required'}), 400
-        translated_text = translate_to_burmese(text)
-        return jsonify({'success': True, 'translation': translated_text}), 200
+        text = request.json.get('text')
+        if not text: return jsonify({'error': 'No text'}), 400
+        return jsonify({'success': True, 'translation': translate_to_burmese(text)})
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=5000)
