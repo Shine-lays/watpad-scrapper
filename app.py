@@ -115,10 +115,9 @@ def translate_chunk_with_retry(chunk: str, retries=3):
                     'model': 'openai/gpt-oss-120b',
                     'messages': [
                         {'role': 'system', 'content': BURMESE_SYSTEM_PROMPT},
-                        {'role': 'user', 'content': chunk}
+                        {'role': 'user', 'content': f"{chunk}"}
                     ],
                     'temperature': 0.2,
-                    'max_tokens': 900
                 },
                 timeout=90
             )
@@ -126,11 +125,13 @@ def translate_chunk_with_retry(chunk: str, retries=3):
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
 
+            # Retry only on congestion / rate limit
             if response.status_code in [429, 503]:
                 rotate_key()
                 time.sleep(1)
                 continue
 
+            # 400 or others = real error (context, payload, etc.)
             logger.error(f"Groq API Error {response.status_code}: {response.text}")
             break
 
