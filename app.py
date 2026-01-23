@@ -115,31 +115,47 @@ def translate_chunk_with_retry(chunk: str, retries=3):
                     'model': 'openai/gpt-oss-120b',
                     'messages': [
                         {'role': 'system', 'content': BURMESE_SYSTEM_PROMPT},
-                        {'role': 'user', 'content': f"{chunk}"}
+                        {'role': 'user', 'content': chunk}
                     ],
                     'temperature': 0.2,
+                    # --- THE GLITCH FIXES ---
+                    'frequency_penalty': 0.8, # Prevents repeating the same word (stops "အရိုးအရိုး")
+                    'presence_penalty': 0.5,  # Forces the AI to use a wider variety of words
+                    'top_p': 0.85,             # Prevents the AI from picking low-probability "glitch" tokens
+                    'max_tokens': 2500        # Enough room for Burmese script expansion
                 },
-                timeout=90
+                timeout=120
             )
 
             if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
+                content = response.json()['choices'][0]['message']['content']
+                
+                # SELF-HEALING LOGIC: Detects the "အရိုးအရိုး" repeating glitch
+                # If the most common word appears too many times relative to length, it's a glitch
+                if len(content) > 50:
+                    words = content.split()
+                    if any(content.count(w) > 15 for w in set(words) if len(w) > 1):
+                        logger.warning("Repetition glitch detected! Rotating key and retrying...")
+                        rotate_key()
+                        continue
+                
+                return content
 
-            # Retry only on congestion / rate limit
-            if response.status_code in [429, 503]:
+            # Handle Rate Limits and Server overloads
+            if response.status_code in [429, 503, 500]:
                 rotate_key()
-                time.sleep(1)
+                time.sleep(2)
                 continue
 
-            # 400 or others = real error (context, payload, etc.)
             logger.error(f"Groq API Error {response.status_code}: {response.text}")
-            break
+            rotate_key() # Swap key even on 400 errors to refresh session
 
         except Exception as e:
-            logger.error(f"Network error with key {current_key_index}: {str(e)}")
+            logger.error(f"Network error: {str(e)}")
             rotate_key()
+            time.sleep(1)
 
-    return "[Translation failed for this section]"
+    return "[Translation failed after multiple retries]"
 
 
 def translate_to_burmese(text: str) -> str:
