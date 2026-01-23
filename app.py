@@ -65,9 +65,9 @@ def extract_wattpad_text(url: str) -> str:
 
 def translate_to_burmese(text: str) -> str:
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY is not set in environment variables.")
+        raise ValueError("GROQ_API_KEY is not set.")
 
-    # Break text into chunks to avoid Groq's output limit
+    # Optimized for Llama 3.3 / 3.1 chunk sizes
     max_chunk = 2000
     chunks = [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]
     translations = []
@@ -82,27 +82,31 @@ def translate_to_burmese(text: str) -> str:
                     'Content-Type': 'application/json'
                 },
                 json={
-                    'model': 'mixtral-8x7b-32768',
+                    # UPDATED MODEL ID: Mixtral is dead, Llama 3.3 is the new king
+                    'model': 'llama-3.3-70b-versatile', 
                     'messages': [
-                        {'role': 'system', 'content': 'You are a professional translator. Translate the text to Burmese (Myanmar). Maintain the story tone. Output ONLY the translated text.'},
-                        {'role': 'user', 'content': f"Translate this:\n\n{chunk}"}
+                        {'role': 'system', 'content': 'You are a professional Myanmar translator. Translate the English story text into natural, literary Burmese. Provide ONLY the translation.'},
+                        {'role': 'user', 'content': chunk}
                     ],
                     'temperature': 0.3,
                 },
-                timeout=90 # High timeout for slow translations
+                timeout=90
             )
             
+            result = response.json()
+            
             if response.status_code == 200:
-                result = response.json()
                 translations.append(result['choices'][0]['message']['content'])
             else:
-                logger.error(f"Groq API error: {response.text}")
-                translations.append(f"[Translation Error for this chunk: {response.status_code}]")
+                # This will now show you the ACTUAL error from Groq in your logs
+                error_msg = result.get('error', {}).get('message', 'Unknown error')
+                logger.error(f"Groq API Error: {error_msg}")
+                translations.append(f"[Error: {error_msg}]")
             
-            time.sleep(0.5) # Prevent rate limiting
+            time.sleep(0.5) 
         except Exception as e:
-            logger.error(f"Chunk translation failed: {str(e)}")
-            translations.append(f"[Chunk Error: {str(e)}]")
+            logger.error(f"Translation failed: {str(e)}")
+            translations.append(f"[Translation Failed: {str(e)}]")
 
     return '\n\n'.join(translations)
 
